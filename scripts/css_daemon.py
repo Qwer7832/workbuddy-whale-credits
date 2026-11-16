@@ -257,6 +257,37 @@ def _spawn_injector():
         return None
 
 
+def ensure_autostart_args():
+    """自愈：WorkBuddy 更新/重装会重写开机自启项并丢掉调试端口参数。
+
+    用户从自启项拉起 WorkBuddy 时就是裸命令行，注入必然失效（表现为
+    「用着用着又不显示了」）。这里在守护启动时补回一次参数。
+    """
+    if os.name != "nt":
+        return
+    try:
+        import winreg
+        name = "WorkBuddy.WorkBuddy"
+        path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path, 0,
+                            winreg.KEY_READ | winreg.KEY_WRITE) as key:
+            try:
+                value, _ = winreg.QueryValueEx(key, name)
+            except FileNotFoundError:
+                return
+            if "remote-debugging-port" in value:
+                return
+            exe = value.strip().strip('"').strip()
+            if not exe or not os.path.isfile(exe):
+                return
+            winreg.SetValueEx(
+                key, name, 0, winreg.REG_SZ,
+                '"%s" --remote-debugging-port=%s --remote-allow-origins=*'
+                % (exe, cdp_port()))
+    except Exception:
+        pass
+
+
 def main():
     # 单实例：占用本地端口，第二个实例直接退出（与旧挂件共用，避免双开）
     lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -266,6 +297,7 @@ def main():
     except OSError:
         sys.exit(0)
 
+    ensure_autostart_args()
     injector = _spawn_injector()
     ticks = 0
     while True:

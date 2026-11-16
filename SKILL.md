@@ -74,6 +74,14 @@ description: "WorkBuddy 版小鲸鱼积分挂件。当用户想查看还剩多�
 | 开机自启 | Windows `HKCU\...\Run\WhaleCredits`（pythonw，无黑框）／macOS LaunchAgent／Linux autostart |
 | 启守护 | 立即拉起后台进程，单实例锁保证不会双开 |
 
+> **最隐蔽的失效点 —— WorkBuddy 自己的自启项**：它会在
+> `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 写一条 `WorkBuddy.WorkBuddy`。
+> 用户从这条（或托盘）拉起应用时是**裸命令行**，绕开了上面补过参数的快捷方式，
+> 表现为「装好能用一阵，重启后又没反应了」。`css_daemon.py` 启动时会调
+> `ensure_autostart_args()` 自检这条自启项并补回端口参数（WorkBuddy 更新冲掉也能自愈）。
+> 手工核查：
+> `reg query HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v WorkBuddy.WorkBuddy`
+
 常用参数：
 
 ```bash
@@ -169,6 +177,11 @@ wb-whale-credits/
 - `seen` 被裁到 4000 条后，若某份日志被轮转重写且事件既超出该窗口、又晚于 `baselineAt`，理论上有重复扣的可能
   （极低概率）；真发生了用官方数字 `set --balance` 校准一次即可归零；
 - 挂件每 10 秒自动跑一次 `credits.sync()`（无变化时完全不写盘），改配置后 2 秒内刷新显示。
+- **账本写入是原子的**：`save()` 用 `<config>.tmp.<pid>` 唯一临时文件 + `fsync` + `os.replace`，
+  覆盖前另存一份 `credits.json.bak`；`load()` 读到坏文件时先尝试从 `.bak` 抢救。
+  守护进程与 CLI 会同时写同一份账本，早期版本共用固定 `.tmp` 名，撞车会写出半截 JSON，
+  而 `load()` 遇 `ValueError` 直接返回默认值 —— 结果是 `balance` 被**静默清成 `null`**
+  （界面显示「积分：0」，账本看似被重置）。已修，若历史版本丢过余额，用 `set --balance` 校准一次。
 
 **覆盖范围与漂移**（要如实告诉用户）：能覆盖本地模型调用与生成类工具消耗；
 **不覆盖**每日签到赠送、套餐周期重置、活动奖励、网页端/其它设备的消耗、服务端直接扣费，

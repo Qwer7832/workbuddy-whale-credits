@@ -21,6 +21,7 @@ import glob
 import json
 import os
 import re
+import shutil
 from datetime import date, datetime, timedelta
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -66,14 +67,26 @@ RE_TOOL = re.compile(
     r"sessionId=(\S+)\s+callId=(\S+)\s+stageId=(\S+)\s+credit=([\d.]+)")
 
 
-def load():
-    if not os.path.exists(CONFIG):
-        return copy.deepcopy(DEFAULT)
+def _read_json(path):
     try:
-        with open(CONFIG, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
     except (OSError, ValueError):
-        return copy.deepcopy(DEFAULT)
+        return None
+
+
+def load():
+    data = _read_json(CONFIG) if os.path.exists(CONFIG) else None
+    if not isinstance(data, dict):
+        # 账本缺失或损坏：先救上一份可用副本，别把余额静默清成 null
+        data = _read_json(CONFIG + ".bak")
+        if isinstance(data, dict):
+            try:
+                shutil.copyfile(CONFIG + ".bak", CONFIG)
+            except OSError:
+                pass
+        else:
+            return copy.deepcopy(DEFAULT)
     merged = copy.deepcopy(DEFAULT)
     merged.update(data)
     merged["window"] = {**DEFAULT["window"], **(data.get("window") or {})}
@@ -82,10 +95,23 @@ def load():
 
 
 def save(data):
+    """原子写：唯一临时文件名 + fsync + 保留上一份可用账本。
+
+    守护进程和 CLI 会同时写同一份账本；此前用固定的 .tmp 文件名，
+    两个进程撞在一起会写出半截 JSON，load() 读坏就回退成 DEFAULT，
+    余额被静默清空。这里改成按 pid 区分临时文件，并在覆盖前留 .bak。
+    """
     os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
-    tmp = CONFIG + ".tmp"
+    tmp = "%s.tmp.%d" % (CONFIG, os.getpid())
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    try:
+        if os.path.exists(CONFIG):
+            shutil.copyfile(CONFIG, CONFIG + ".bak")
+    except OSError:
+        pass
     os.replace(tmp, CONFIG)
 
 
