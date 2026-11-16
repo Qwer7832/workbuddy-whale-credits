@@ -1,0 +1,30 @@
+{
+  "balance": null,
+  "todayUsage": 0,
+  "date": null,
+  "unit": "积分",
+  "updatedAt": "",
+  "note": "在 WorkBuddy 左下角头像 → 套餐与积分 查看官方余额，然后校准",
+  "window": {
+    "x": null,
+    "y": null,
+    "alpha": 0.95,
+    "onlyOnWorkBuddy": false,
+    "globalTopmost": false,
+    "titleBarDock": true,
+    "dockPosition": "bottom",
+    "twoPages": false,
+    "cssSlogan": true
+  },
+  "ledger": {
+    "autoSync": true,
+    "baselineAt": null,
+    "scan": {},
+    "seen": {},
+    "events": [],
+    "history": {},
+    "lastCost": 0,
+    "lastEventAt": "",
+    "lastKind": ""
+  }
+}

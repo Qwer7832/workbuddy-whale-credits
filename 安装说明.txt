@@ -1,0 +1,57 @@
+小鲸鱼积分挂件 · 安装说明
+================================
+
+一句话：解压 → 双击 install.bat → 重启一次 WorkBuddy。
+
+详细三步
+--------
+1) 解压这个压缩包，进入 wb-whale-credits 文件夹，双击 install.bat。
+   它会自动：
+     - 找到 WorkBuddy 自带的 Python / Node（不用另外装环境）
+     - 把技能装到 %USERPROFILE%\.workbuddy\skills\wb-whale-credits
+     - 给桌面、开始菜单、任务栏的 WorkBuddy 图标补上调试端口参数
+     - 设置开机自启，并立刻启动后台守护进程
+
+2) 完全退出 WorkBuddy（右下角托盘图标也要右键退出），
+   再用桌面上的 WorkBuddy 图标重新打开。
+   判断是否生效：任务管理器 → 详细信息 → WorkBuddy.exe 的「命令行」
+   里应当有 --remote-debugging-port=9223。
+
+3) 校准余额（只需一次）：
+   WorkBuddy 左下角头像 →「套餐与积分」，记住官方余额，
+   然后在 wb-whale-credits 文件夹的地址栏输入 cmd 回车，执行：
+
+     python scripts\credits.py set --balance 你的余额
+
+   之后每笔消耗都会自动从本地日志里扣，会话底部那行会实时变化。
+
+
+看到什么
+--------
+每个会话输入框下方那一行会变成：
+
+    积分：1955.88 今日已用：297.72 本会话已用：101.04
+
+官方那句「内容由 AI 生成，请核实重要信息」会被收起，只留积分。
+数字变化有 1~2 秒延迟，属正常。
+
+
+遇到问题
+--------
+· 界面上什么都没变
+  → 九成是 WorkBuddy 没带调试端口启动，看第 2 步的「判断是否生效」。
+  → 确认后台在跑：任务管理器里应有 pythonw.exe 和 node.exe 各一个。
+
+· install.bat 一闪就没了
+  → 打开 cmd，把 install.bat 拖进去回车，就能看到报错；
+    或直接执行 python install.py --check 看体检结果。
+
+· 想换端口（9223 被别的程序占了）
+  → python install.py --cdp-port 9224
+
+· 想彻底卸载
+  → 删掉 %USERPROFILE%\.workbuddy\skills\wb-whale-credits
+  → 注册表 HKCU\Software\Microsoft\Windows\CurrentVersion\Run 删掉 WhaleCredits
+  → 在任务管理器里结束对应的 pythonw.exe / node.exe
+
+这个挂件不联网、不读聊天内容，只读 WorkBuddy 本地日志里的积分消耗行。
