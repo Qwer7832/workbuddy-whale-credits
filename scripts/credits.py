@@ -13,6 +13,7 @@
     python credits.py sync [--dry-run]                                  # 从日志同步消耗
     python credits.py consume --amount 12.5 [--note "..."]              # 手动补记一笔
     python credits.py ledger [--limit 10]                               # 查看流水
+    python credits.py grant [--on|--off] [--amount 100] [--now]          # 每日赠送积分设置
     python credits.py reset-today
 """
 import argparse
@@ -23,6 +24,12 @@ import os
 import re
 import shutil
 from datetime import date, datetime, timedelta
+
+# 官方每日赠送积分（用户 2026-11-18 确认为每天 100）。
+# 注意：本地日志里没有赠送流水（全是消耗），所以这笔是「按用户已知政策」本地补记，
+# 不是从日志读出来的真值。官方余额变化请以客户端为准，必要时用 set --balance 校准。
+DAILY_GRANT_AMOUNT = 100
+DAILY_GRANT_MAX_DAYS = 370   # 补给记录保留天数上限（略大于一年）
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOME = os.path.expanduser("~")
@@ -48,6 +55,14 @@ DEFAULT = {
         "lastCost": 0,
         "lastEventAt": "",
         "lastKind": "",
+        # 每日赠送积分：按用户确认的「官方每天送 100」在跨天时补记一笔正向流水。
+        # grantedDays 用日期去重，同一天只补一次；校准余额时把当天标记为已补，
+        # 避免用户手输的官方余额（已含当天赠送）再被叠加。
+        "dailyGrant": {
+            "enabled": True,
+            "amount": DAILY_GRANT_AMOUNT,
+            "grantedDays": [],
+        },
     },
 }
 
@@ -59,6 +74,7 @@ EVENTS_KEEP_DAYS = 90    # 流水保留时间窗（两者同时生效，取交�
 SEEN_MAX = 4000          # 去重键上限（留 2 倍余量，降低日志轮转时重算的可能）
 HISTORY_KEEP_DAYS = 90   # 按日汇总保留天数
 BY_SESSION_MAX = 120     # 按会话累计保留个数
+
 RE_MODEL = re.compile(
     r"\[AcpUsagePublisher\].*?\[CreditUsageSource\]\s+source=(\S+)\s+"
     r"sessionId=(\S+)\s+requestId=(\S+)\s+messageId=(\S+)\s+credit=([\d.]+)")
@@ -122,6 +138,63 @@ def roll_day(data):
         data["date"] = today
         data["todayUsage"] = 0
     return data
+
+
+def grant_daily(data, dry_run=False):
+    """按官方每日赠送政策给本地账本补记正向积分（默认每天 100）。
+
+    规则：
+      - 只有余额已校准（balance 非 None）才补；未校准时补了也没有基准，没意义。
+      - 按自然日去重，同一天最多补一次，记在 ledger.dailyGrant.grantedDays。
+      - 校准（set --balance）会把当天标记为已补：官方数字本身已含当天赠送，
+        不能重复叠加。
+      - 补给作为一条 kind="每日补给" 的 event 写入流水，便于 ledger 里审计。
+      - 跨天首次 sync 时由守护进程自动触发；也可以 `grant --force` 手动补。
+    返回 (本次补给金额, 说明)；不补时金额为 0。
+    """
+    ledger = data.setdefault("ledger", {})
+    cfg = ledger.setdefault("dailyGrant", {})
+    if not cfg.get("enabled", True):
+        return 0.0, "每日补给已关闭"
+    if data.get("balance") is None:
+        return 0.0, "余额未校准，跳过补给（先 set --balance）"
+
+    today = date.today().isoformat()
+    granted = cfg.setdefault("grantedDays", [])
+    if today in granted:
+        return 0.0, "今天已补过"
+    amount = round(float(cfg.get("amount", DAILY_GRANT_AMOUNT)), 2)
+    if amount <= 0:
+        return 0.0, "补给金额非正，跳过"
+
+    if not dry_run:
+        data["balance"] = round(float(data["balance"]) + amount, 2)
+        granted.append(today)
+        # 保留上限，防止 grantedDays 无限增长
+        if len(granted) > DAILY_GRANT_MAX_DAYS:
+            cfg["grantedDays"] = granted[-DAILY_GRANT_MAX_DAYS:]
+        records = ledger.setdefault("events", [])
+        records.append({
+            "ts": datetime.now().strftime("%Y/%m/%d %H:%M:%S"),
+            "cost": -amount,          # 负数流水 = 增加积分
+            "kind": "每日补给",
+            "key": "grant|" + today,
+            "session": "",
+        })
+        ledger["events"] = records[-EVENTS_MAX:]
+        data["updatedAt"] = stamp()
+    return amount, "已补 %+.2f" % amount
+
+
+def mark_grant_today(data):
+    """校准余额时调用：把今天标记为已补，避免官方数字（含当天赠送）被重复叠加。"""
+    cfg = data.setdefault("ledger", {}).setdefault("dailyGrant", {})
+    granted = cfg.setdefault("grantedDays", [])
+    today = date.today().isoformat()
+    if today not in granted:
+        granted.append(today)
+        if len(granted) > DAILY_GRANT_MAX_DAYS:
+            cfg["grantedDays"] = granted[-DAILY_GRANT_MAX_DAYS:]
 
 
 def fmt(value):
@@ -326,6 +399,8 @@ def sync(data, dry_run=False):
     if dry_run:
         data = copy.deepcopy(data)
     roll_day(data)
+    # 每日赠送：跨天首次 sync 补记 100（余额未校准/当天已补会自动跳过）。
+    granted, grant_note = grant_daily(data, dry_run=dry_run)
     ledger = data.setdefault("ledger", {})
     if not ledger.get("baselineAt"):
         # 兼容老配置：以最近一次人工设值的时间作为基准，历史消耗不重复扣
@@ -355,10 +430,11 @@ def sync(data, dry_run=False):
         if fresh:
             apply_events(data, ledger, fresh)
         # 无变化时完全不写盘，避免挂件轮询反复刷新 mtime
-        if fresh or new_state != previous_scan:
+        if fresh or new_state != previous_scan or granted:
             save(data)
     return {"count": len(fresh), "total": total, "events": fresh,
-            "balance": data.get("balance"), "todayUsage": data.get("todayUsage")}
+            "balance": data.get("balance"), "todayUsage": data.get("todayUsage"),
+            "granted": granted, "grantNote": grant_note}
 
 
 def main():
@@ -385,6 +461,14 @@ def main():
     rebuild = sub.add_parser("rebuild-sessions", help="按日志重建各会话累计消耗（仅展示用，不动余额）")
     rebuild.add_argument("--days", type=int, default=2, help="回扫最近几天（默认 2）")
 
+    granter = sub.add_parser("grant", help="每日赠送积分：查看状态 / 开关 / 改金额 / 手动补")
+    granter.add_argument("--on", action="store_true", help="开启每日补给")
+    granter.add_argument("--off", action="store_true", help="关闭每日补给")
+    granter.add_argument("--amount", type=float, default=None, help="修改每次补给金额（默认 100）")
+    granter.add_argument("--now", action="store_true", help="手动补记今天（已补过则跳过，除非 --force）")
+    granter.add_argument("--force", action="store_true", help="配合 --now：今天已补也再补一次")
+    granter.add_argument("--unmark", action="store_true", help="清除今天的已补标记（用于重补）")
+
     sub.add_parser("reset-today", help="今日已用清零")
     sub.add_parser("paths", help="显示配置与日志路径（安装排查用）")
 
@@ -406,6 +490,9 @@ def main():
               f" · 基准 {ledger.get('baselineAt') or '（无）'}"
               f" · 已记 {len(ledger.get('events') or [])} 笔")
         print(f"最近一笔: {fmt(ledger.get('lastCost') or 0)} @ {ledger.get('lastEventAt') or '—'}")
+        g = ledger.get("dailyGrant") or {}
+        print(f"每日补给: {'开' if g.get('enabled', True) else '关'} · +{fmt(g.get('amount', DAILY_GRANT_AMOUNT))}"
+              f" · 已补 {len(g.get('grantedDays') or [])} 天")
         print(f"备注: {data.get('note') or '（无）'}")
         print("---")
         print(json.dumps(data, ensure_ascii=False, indent=2))
@@ -420,6 +507,8 @@ def main():
             # 注意：bySession 是各会话的历史累计（纯展示用），校准不该抹掉它，
             # 否则所有旧会话都会变成 0，页面上看起来就像"每个会话都一样"。
             data.setdefault("ledger", {})["baselineAt"] = stamp()
+            # 官方数字已含当天赠送，标记今天已补，防止紧接着的 sync 再叠加 100
+            mark_grant_today(data)
         if args.today is not None:
             data["todayUsage"] = args.today
         if args.note is not None:
@@ -475,6 +564,47 @@ def main():
         print(f"已重建 {len(by_session)} 个会话（扫描去重后 {scanned} 笔事件），余额未变：{fmt(data.get('balance'))}")
         for sid, cost in list(by_session.items())[-8:]:
             print(f"  {sid[:8]}…  {fmt(cost)}")
+        return
+
+    if args.cmd == "grant":
+        cfg = data.setdefault("ledger", {}).setdefault("dailyGrant", {})
+        changed = False
+        if args.on:
+            cfg["enabled"] = True
+            changed = True
+        if args.off:
+            cfg["enabled"] = False
+            changed = True
+        if args.amount is not None:
+            if args.amount <= 0:
+                parser.error("--amount 必须大于 0")
+            cfg["amount"] = round(args.amount, 2)
+            changed = True
+        if args.unmark:
+            today = date.today().isoformat()
+            marked = cfg.setdefault("grantedDays", [])
+            if today in marked:
+                marked.remove(today)
+            changed = True
+            print("已清除今天的补给标记")
+        if args.now:
+            cfg["enabled"] = True   # 手动补不受开关影响
+            if args.force:
+                today = date.today().isoformat()
+                marked = cfg.setdefault("grantedDays", [])
+                if today in marked:
+                    marked.remove(today)
+            got, note = grant_daily(data)
+            changed = True
+            print(f"手动补给：{note}，余额 → {fmt(data.get('balance'))}")
+        if changed:
+            data["updatedAt"] = stamp()
+            save(data)
+        granted = cfg.get("grantedDays") or []
+        print(f"每日补给: {'开' if cfg.get('enabled', True) else '关'} · 每次 +{fmt(cfg.get('amount', DAILY_GRANT_AMOUNT))}"
+              f" · 已补 {len(granted)} 天")
+        if granted:
+            print("最近补给日期: " + ", ".join(granted[-5:]))
         return
 
     if args.cmd == "reset-today":

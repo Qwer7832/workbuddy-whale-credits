@@ -74,14 +74,6 @@ description: "WorkBuddy 版小鲸鱼积分挂件。当用户想查看还剩多�
 | 开机自启 | Windows `HKCU\...\Run\WhaleCredits`（pythonw，无黑框）／macOS LaunchAgent／Linux autostart |
 | 启守护 | 立即拉起后台进程，单实例锁保证不会双开 |
 
-> **最隐蔽的失效点 —— WorkBuddy 自己的自启项**：它会在
-> `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 写一条 `WorkBuddy.WorkBuddy`。
-> 用户从这条（或托盘）拉起应用时是**裸命令行**，绕开了上面补过参数的快捷方式，
-> 表现为「装好能用一阵，重启后又没反应了」。`css_daemon.py` 启动时会调
-> `ensure_autostart_args()` 自检这条自启项并补回端口参数（WorkBuddy 更新冲掉也能自愈）。
-> 手工核查：
-> `reg query HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v WorkBuddy.WorkBuddy`
-
 常用参数：
 
 ```bash
@@ -177,19 +169,30 @@ wb-whale-credits/
 - `seen` 被裁到 4000 条后，若某份日志被轮转重写且事件既超出该窗口、又晚于 `baselineAt`，理论上有重复扣的可能
   （极低概率）；真发生了用官方数字 `set --balance` 校准一次即可归零；
 - 挂件每 10 秒自动跑一次 `credits.sync()`（无变化时完全不写盘），改配置后 2 秒内刷新显示。
-- **账本写入是原子的**：`save()` 用 `<config>.tmp.<pid>` 唯一临时文件 + `fsync` + `os.replace`，
-  覆盖前另存一份 `credits.json.bak`；`load()` 读到坏文件时先尝试从 `.bak` 抢救。
-  守护进程与 CLI 会同时写同一份账本，早期版本共用固定 `.tmp` 名，撞车会写出半截 JSON，
-  而 `load()` 遇 `ValueError` 直接返回默认值 —— 结果是 `balance` 被**静默清成 `null`**
-  （界面显示「积分：0」，账本看似被重置）。已修，若历史版本丢过余额，用 `set --balance` 校准一次。
 
 **覆盖范围与漂移**（要如实告诉用户）：能覆盖本地模型调用与生成类工具消耗；
-**不覆盖**每日签到赠送、套餐周期重置、活动奖励、网页端/其它设备的消耗、服务端直接扣费，
-以及日志被清理前的历史。免费模型（如 `hy4free`）不产生 credit 记录。
-所以余额会 drift，建议用户每隔一段时间从 **左下角头像 → 套餐与积分** 抄一次官方数字，
+每日赠送积分由下面的「每日补给」补记；**不覆盖**套餐周期重置、活动奖励、
+网页端/其它设备的消耗、服务端直接扣费，以及日志被清理前的历史。
+免费模型（如 `hy4free`）不产生 credit 记录。
+所以余额仍会 drift，建议用户每隔一段时间从官方渠道抄一次真实数字，
 用 `set --balance` 校准（该命令会重置 `ledger.baselineAt`，之后只扣新产生的消耗）。
 
 **补充账目**：日志没记到的消耗可用 `consume --amount N --note "..."` 手动补记一笔。
+
+### 每日补给（官方每日赠送积分）
+
+按用户确认的政策（**每天赠送 100 积分**），守护进程跨天首次 `sync()` 时自动给余额补 +100：
+
+- **数据源性质**：本地日志里**没有**赠送流水（全是消耗），这笔是按用户已知政策**本地补记**，
+  不是从日志或服务端读到的真值。账户真实余额以官方渠道为准，定期 `set --balance` 校准即可。
+- **日期去重**：记在 `ledger.dailyGrant.grantedDays`，同一自然日最多补一次，不会因守护反复轮询重复叠加。
+- **校准防叠加**：`set --balance` 会把当天标记为已补——因为官方数字本身已含当天赠送；
+  如果你是在校准后改主意想补当天，用 `grant --now --force`。
+- **未校准不补**：`balance` 为 null 时跳过补给（没有基准，补了没意义）。
+- **补给作为负数流水**（`kind="每日补给"`，`cost=-100`）写入 `events`，可在 `ledger` 里审计。
+- **开关与金额**：默认开、每次 +100；`grant --off` 关闭，`grant --amount 50` 改金额，
+  `grant --on` 重开，`grant --now` 手动补今天。
+- **可移植性**：这些配置都在账本 JSON 里，随 `credits.json` 走；不装这份新版脚本的机器不受影响。
 
 ## 命令速查
 
@@ -203,6 +206,10 @@ python3 "$SK/scripts/credits.py" sync              # 从日志同步新增消耗
 python3 "$SK/scripts/credits.py" sync --dry-run    # 只试算不写入
 python3 "$SK/scripts/credits.py" set --balance 1234.56   # 官方数字校准（重置基准）
 python3 "$SK/scripts/credits.py" consume --amount 12.5   # 手动补记一笔消耗
+python3 "$SK/scripts/credits.py" grant                  # 查看每日补给状态
+python3 "$SK/scripts/credits.py" grant --off            # 关闭每日补给（--on 重开）
+python3 "$SK/scripts/credits.py" grant --amount 50      # 改补给金额为 50
+python3 "$SK/scripts/credits.py" grant --now --force    # 手动强制补今天一次
 python3 "$SK/scripts/credits.py" ledger --limit 10       # 查看逐笔流水与按日汇总
 python3 "$SK/scripts/credits.py" reset-today            # 今日已用清零
 python3 "$SK/install.py" --check                   # 安装环境体检
@@ -231,17 +238,23 @@ python3 "$SK/install.py" --check                   # 安装环境体检
 2. **用户报出官方余额** → 用 `credits.py set --balance <数字>` **校准**（不是简单覆盖），
    回复「已校准，之后只扣新增消耗」。校准只重置 `baselineAt`，**不清空 `bySession`**
    （它是各会话历史累计，纯展示用；清空会让所有旧会话变 0，看起来像「每个会话都一样」）。
-3. **用户问「能否按消耗自动统计」** → 按上面「自动记账怎么工作」解释数据源、去重、基准与漂移边界，
+   校准还会把当天标记为「每日补给已补」，因为官方数字已含当天赠送；
+   若用户明确要求当天额外补 100，用 `grant --now --force`。
+3. **用户要求「每天自动加积分 / 自动领每日赠送」** → 说明边界：**插件改不了官方账户**，
+   只能按用户确认的政策在本地账本补记；若官方实际上没有每日赠送，补进去就是假数字，
+   务必先确认政策再开。确认后用 `grant --on --amount 100`（默认已开），
+   跨天由守护自动补；用 `grant` 查看状态、`grant --off` 关闭。
+4. **用户问「能否按消耗自动统计」** → 按上面「自动记账怎么工作」解释数据源、去重、基准与漂移边界，
    并跑一次 `sync` 展示实际扣减结果。
-4. **「打开 / 启动守护」** → Windows 用 Explorer 方式启动 `start_whale.bat`（运行 css_daemon.py），
+5. **「打开 / 启动守护」** → Windows 用 Explorer 方式启动 `start_whale.bat`（运行 css_daemon.py），
    macOS / Linux 直接双击或 `bash start_whale.command` / `.sh`；不会弹出任何窗口。
-5. **「关闭挂件 / 停止守护」** → 按 PID 停掉 `css_daemon.py` 进程（端口 48765 的拥有者），
+6. **「关闭挂件 / 停止守护」** → 按 PID 停掉 `css_daemon.py` 进程（端口 48765 的拥有者），
    不要用 `taskkill /IM pythonw.exe` 批量结束（会误杀其它程序）。
-6. **「把它做成一个插件 / 装到别的电脑」** → 按上面「安装到另一台电脑」说明分发包与三种安装方式，
+7. **「把它做成一个插件 / 装到别的电脑」** → 按上面「安装到另一台电脑」说明分发包与三种安装方式，
    必要时跑 `scripts/package.py` 重新打包。
-7. **用户说「本会话已用不对 / 切换会话数字不变」** → 先跑 `rebuild-sessions` 重建各会话累计，
+8. **用户说「本会话已用不对 / 切换会话数字不变」** → 先跑 `rebuild-sessions` 重建各会话累计，
    再确认 `cdp_inject.js` 的 `label()` 在认出会话 id 后不会回退到别的会话数字（旧版会串台）。
-7. **用户问「能不能把 dsh-whale-widget 直接装到 WorkBuddy」** → 按「边界」如实解释生态差异。
+9. **用户问「能不能把 dsh-whale-widget 直接装到 WorkBuddy」** → 按「边界」如实解释生态差异。
 
 ## 对话内积分卡片模板（SVG，light 主题）
 
