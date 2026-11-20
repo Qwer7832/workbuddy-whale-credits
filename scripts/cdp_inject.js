@@ -159,6 +159,21 @@ function sourceFor(text, usage) {
           box.insertBefore(mine, anchor);
         }
         if(mine.textContent!==line) mine.textContent=line;
+        /* 「⊕100」一键补给开关：点击经 CDP binding 回传 node，调 credits.py 加 100 */
+        var grantBtn=box.querySelector('[data-wb-credits="grant-btn"]');
+        if(!grantBtn){
+          grantBtn=document.createElement('span');
+          grantBtn.setAttribute('data-wb-credits','grant-btn');
+          grantBtn.textContent=' ⊕100';
+          grantBtn.title='点一下给本地账本加 100 积分（不影响官方账户）';
+          box.insertBefore(grantBtn, mine.nextSibling);
+        }
+        /* 每次注入都重绑 onclick：注入器重启后页面里残留的是旧徽标 DOM，
+           只有重新赋值才能把新版点击逻辑换上去。 */
+        grantBtn.onclick=function(){
+          /* 写进页面全局队列，node 在 tick 里用 Runtime.evaluate 取走。 */
+          try{ window.__wbGrantQueue=(window.__wbGrantQueue||0)+1; }catch(e){}
+        };
         /* 只留积分那一行：拆掉分隔符，隐藏官方声明 */
         var seps=box.querySelectorAll('[data-wb-credits="sep"]');
         for(var q=0;q<seps.length;q++) seps[q].parentNode.removeChild(seps[q]);
@@ -182,7 +197,10 @@ function sourceFor(text, usage) {
              + '[data-wb-credits="hidden"]{display:none !important;}';
       /* 比继承来的 rgba(0,0,0,.4) 明显更深；跟随主题变量，深色主题下自动变亮 */
       var deep='.wb-homepage-disclaimer [data-wb-credits="slogan"]'
-             + '{color:var(--wb-credits-text-color,var(--wb-color-text-primary,#111)) !important;}';
+             + '{color:var(--wb-credits-text-color,var(--wb-color-text-primary,#111)) !important;}'
+             + '.wb-homepage-disclaimer [data-wb-credits="grant-btn"]'
+             + '{cursor:pointer !important;color:var(--wb-color-primary,#2b7fff) !important;'
+             + 'font-weight:700 !important;user-select:none !important;}';
       var css=visible
         ? bold+deep+'.wb-home-route:not(.wb-calendar-route)::after{content:"" !important;}'
         : bold+deep+'.wb-home-route:not(.wb-calendar-route)::after{content:"'+escCss(line)+'" !important;font-weight:600 !important;color:var(--wb-credits-text-color,var(--wb-color-text-primary,#111)) !important;}';
@@ -255,6 +273,33 @@ let lastText = null;
 let lastUsage = {};
 let lastKey = '';
 
+/* 「⊕100」开关：页面点击经 binding 回传到这里，调 credits.py 记账。
+   防抖：1.5 秒内的重复点击忽略，避免手抖连点刷出多笔。 */
+const CHILD = require('child_process');
+let lastGrantAt = 0;
+function handleGrantClick(clicks) {
+  clicks = Math.max(1, Number(clicks) || 1);
+  const now = Date.now();
+  if (now - lastGrantAt < 1000) { log('grant click debounced'); return; }
+  lastGrantAt = now;
+  const py = path.join(SKILL_DIR, 'config', 'python_path.txt');
+  let exe = 'python';
+  try { const v = fs.readFileSync(py, 'utf8').trim(); if (v) exe = v; } catch (_) {}
+  const script = path.join(SKILL_DIR, 'scripts', 'credits.py');
+  const times = Math.min(clicks, 10);   // 上限：防止异常队列一次刷出过多进程
+  try {
+    for (let i = 0; i < times; i++) {
+      const out = CHILD.execFileSync(exe, [script, 'grant', '--now', '--force'], {
+        encoding: 'utf8', timeout: 20000, windowsHide: true,
+      });
+      if (i === 0) log('grant click -> ' + (out || '').trim().split('\n')[0]);
+    }
+    if (times > 1) log(`grant click x${times} done`);
+  } catch (err) {
+    log('grant click FAILED: ' + (err.message || err));
+  }
+}
+
 function currentSource() {
   const text = sloganText() || lastText || '';
   return sourceFor(text, lastUsage);
@@ -307,6 +352,20 @@ async function tick() {
       log(`text -> ${text} (sessions: ${Object.keys(usage).length})`);
       await evaluateAll();
     }
+  }
+  /* 轮询「⊕100」徽标的点击队列：页面把点击次数写进 window.__wbGrantQueue，
+     这里读走并清零。用 Runtime.evaluate 而非 addBinding，因为后者对注入器
+     重启时已存在的 execution context 不生效。任一页面点到就记一笔账。 */
+  for (const [tid, client] of attached) {
+    if (!client.open) continue;
+    try {
+      const r = await client.send('Runtime.evaluate', {
+        expression: `(function(){var n=window.__wbGrantQueue|0;window.__wbGrantQueue=0;return n;})()`,
+        returnByValue: true,
+      });
+      const n = r && r.result ? Number(r.result.value) : 0;
+      if (n > 0) { log(`grant click x${n}`); handleGrantClick(n); }
+    } catch (_) {}
   }
   let targets = [];
   try { targets = await listTargets(); } catch (_) { return; }   // port closed: app not started yet
